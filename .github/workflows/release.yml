@@ -17,6 +17,11 @@ on:
           - next
           - stable
           - legacy
+      kernel_name:
+        description: 'Kernel name (will be added to CONFIG_LOCALVERSION)'
+        required: true
+        default: '-GKI-KernelSU-Next'
+        type: string
       use_latest_clang:
         description: 'Use latest AOSP Clang'
         required: true
