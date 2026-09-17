@@ -60,22 +60,22 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/toolchains
           cd $GITHUB_WORKSPACE/toolchains
 
-          # Download AOSP Clang
-          CLANG_VERSION="r487747c"  # Android 12 (5.10) kompatibel
-          if [ "${{ github.event.inputs.use_latest_clang }}" = "true" ]; then
-            CLANG_VERSION="r487747c"
-          fi
+          # Clang r416183b (Clang 12.0.7) – passend für android12-5.10 GKI
+          CLANG_COMMIT="4f6c7ad9dae1d75ee7aea31d9eafebafe087ff43"
+          CLANG_VERSION="r416183b"
 
-          echo "Downloading AOSP Clang $CLANG_VERSION..."
-          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-$CLANG_VERSION.tar.gz" \
+          echo "Downloading AOSP Clang $CLANG_VERSION (commit: $CLANG_COMMIT)..."
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_COMMIT}.tar.gz" \
             -O clang.tar.gz
+
           mkdir -p clang-aosp
           tar -xzf clang.tar.gz -C clang-aosp
           rm clang.tar.gz
 
           echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang-aosp/bin" >> $GITHUB_ENV
           echo "PATH=$GITHUB_WORKSPACE/toolchains/clang-aosp/bin:$PATH" >> $GITHUB_ENV
-
+          echo "CLANG_VERSION=$CLANG_VERSION" >> $GITHUB_ENV
+          
       - name: Apply KernelSU-Next patch
         working-directory: kernel-source
         run: |
