@@ -1,39 +1,170 @@
-name: Release
+name: Build GKI Kernel with KernelSU-Next
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-
-permissions:
-  contents: write
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Kernel source branch'
+        required: true
+        default: 'android12-5.10-staging'
+        type: string
+      ksu_branch:
+        description: 'KernelSU-Next branch (next/stable/legacy)'
+        required: true
+        default: 'next'
+        type: choice
+        options:
+          - next
+          - stable
+          - legacy
+      use_latest_clang:
+        description: 'Use latest AOSP Clang'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build GKI Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout
+      - name: Checkout kernel source
         uses: actions/checkout@v4
-
-      - name: Fetch tags
-        run: git fetch --force --tags
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
-          cache: true
+          repository: 'ramabondanp/android_kernel_common-5.10'
+          ref: ${{ github.event.inputs.kernel_branch }}
+          path: kernel-source
 
-      - name: Export Environment Variables
+      - name: Install build dependencies
         run: |
-          echo "APP_VERSION=$(bash scripts/get_version.sh)" >> $GITHUB_ENV
-          echo "GO_VERSION=$(go version)" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf \
+            imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 \
+            libncurses5-dev libsdl1.2-dev libssl-dev libxml2 \
+            libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 \
+            python3-pip
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Set up build environment
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchains
+          cd $GITHUB_WORKSPACE/toolchains
+
+          # Download AOSP Clang
+          CLANG_VERSION="r487747c"  # Android 12 (5.10) kompatibel
+          if [ "${{ github.event.inputs.use_latest_clang }}" = "true" ]; then
+            CLANG_VERSION="r487747c"
+          fi
+
+          echo "Downloading AOSP Clang $CLANG_VERSION..."
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-$CLANG_VERSION.tar.gz" \
+            -O clang.tar.gz
+          mkdir -p clang-aosp
+          tar -xzf clang.tar.gz -C clang-aosp
+          rm clang.tar.gz
+
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang-aosp/bin" >> $GITHUB_ENV
+          echo "PATH=$GITHUB_WORKSPACE/toolchains/clang-aosp/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Apply KernelSU-Next patch
+        working-directory: kernel-source
+        run: |
+          echo "Applying KernelSU-Next patch (branch: ${{ github.event.inputs.ksu_branch }})..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_branch }}
+
+      - name: Configure kernel
+        working-directory: kernel-source
+        run: |
+          # GKI defconfig für arm64
+          make ARCH=arm64 \
+            CC=$CLANG_PATH/clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            gki_defconfig
+
+          # Erforderliche KernelSU-Konfigurationen aktivieren
+          ./scripts/config --file .config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_KPROBES \
+            --enable CONFIG_KPROBE_EVENTS \
+            --enable CONFIG_KSU_KPROBE_HOOKS \
+            --enable CONFIG_MODULES
+
+          # Optionale Konfigurationen für bessere Kompatibilität
+          ./scripts/config --file .config \
+            --enable CONFIG_KALLSYMS \
+            --enable CONFIG_KALLSYMS_ALL \
+            --enable CONFIG_DEBUG_INFO
+
+          # Konfiguration aktualisieren
+          make ARCH=arm64 \
+            CC=$CLANG_PATH/clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+      - name: Build kernel
+        working-directory: kernel-source
+        run: |
+          echo "Building kernel..."
+          make -j$(nproc) \
+            ARCH=arm64 \
+            CC=$CLANG_PATH/clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out \
+            Image.gz
+
+      - name: Build kernel modules
+        working-directory: kernel-source
+        run: |
+          echo "Building kernel modules..."
+          make -j$(nproc) \
+            ARCH=arm64 \
+            CC=$CLANG_PATH/clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            O=out \
+            modules
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          cp kernel-source/out/arch/arm64/boot/Image.gz $GITHUB_WORKSPACE/artifacts/ 2>/dev/null || \
+            cp kernel-source/out/arch/arm64/boot/Image $GITHUB_WORKSPACE/artifacts/
+          cp kernel-source/out/arch/arm64/boot/Image.lz4 $GITHUB_WORKSPACE/artifacts/ 2>/dev/null || true
+
+          # Kernel-Module sammeln
+          find kernel-source/out -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/artifacts/ \; 2>/dev/null || true
+
+          echo "Artifacts:"
+          ls -la $GITHUB_WORKSPACE/artifacts/
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
         with:
-          version: latest
-          args: release --clean
-          workdir: agb
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: gki-kernel-${{ github.event.inputs.kernel_branch }}-ksu
+          path: $GITHUB_WORKSPACE/artifacts/
+          retention-days: 30
+
+      - name: Create summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel Source:** ramabondanp/android_kernel_common-5.10" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.event.inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **KernelSU-Next Branch:** ${{ github.event.inputs.ksu_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Clang Version:** $CLANG_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifacts:** gki-kernel-${{ github.event.inputs.kernel_branch }}-ksu" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Files" >> $GITHUB_STEP_SUMMARY
+          ls -la $GITHUB_WORKSPACE/artifacts/ >> $GITHUB_STEP_SUMMARY
